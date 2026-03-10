@@ -1,0 +1,15 @@
+# 毕业论文项目 - 教育数据聚类分析
+# Python 3.9 环境（使用 pip 安装依赖）
+
+# 核心数据处理与分析
+pandas==1.4.2
+numpy==1.21.5
+scikit-learn==1.0.2
+
+# 可视化
+matplotlib==3.5.1
+seaborn==0.11.2
+
+# 融合算法与并行加速
+scipy
+joblib
