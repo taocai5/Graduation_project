@@ -41,3 +41,5 @@ edu_cluster/
 output/*.png
 output/*.pkl
 output/*.model
+#文档
+md文档/
