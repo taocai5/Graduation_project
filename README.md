@@ -6,6 +6,7 @@
 
 - Python 3.9
 - Microsoft C++ Build Tools（部分库如 scikit-learn 在 Windows 上编译时需要）
+- GCC / G++ (MinGW) for C++ implementation
 
 ## 快速开始
 
@@ -17,13 +18,33 @@
 pip install -r requirements.txt
 ```
 
+### 2. 运行 C++ 聚类算法
+
+本项目提供了 C++ 实现的 K-Means 算法。
+
+运行脚本（Windows）：
+```bash
+./run.bat
+```
+
+或者手动编译：
+```bash
+g++ src/main.cpp src/csv_reader.cpp src/kmeans.cpp -o main.exe
+./main.exe
+```
+
+程序将读取 `data/student-mat.csv`，执行聚类，并将结果保存至 `output/clustering_results.csv`。
+
 ### 3. 项目结构
 
 ```
 Graduation_project/
 ├── data/           # 原始数据（如 Student Performance Dataset CSV）
 ├── src/            # 源代码
-│   ├── data_loader.py   # 数据加载与基本信息统计
+│   ├── main.cpp         # C++ 主程序
+│   ├── kmeans.h/cpp     # K-Means 算法实现
+│   ├── csv_reader.h/cpp # CSV 读取工具
+│   ├── data_loader.py   # Python 数据加载与基本信息统计
 │   └── __init__.py
 ├── notebooks/      # 实验性 Jupyter Notebook
 ├── output/         # 结果图表与模型
@@ -31,7 +52,7 @@ Graduation_project/
 └── requirements.txt
 ```
 
-### 4. 使用数据加载模块
+### 4. 使用 Python 数据加载模块
 
 ```python
 from src.data_loader import load_and_inspect, load_student_data
