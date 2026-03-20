@@ -37,9 +37,12 @@ edu_cluster/
 .ipynb_checkpoints/
 
 # 数据与输出（可按需取消注释以忽略大文件）
-# data/*.csv
+ data/*.csv
 output/*.png
 output/*.pkl
 output/*.model
+output/*.csv
 #文档
 md文档/
+#key
+kaggle.json
