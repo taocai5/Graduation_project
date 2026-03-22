@@ -1,14 +1,11 @@
 """
-Cluster experiment pipeline for graduation project.
-
-Outputs:
-1) Elbow metrics CSV (SSE + Silhouette for k range)
-2) Elbow/Silhouette plots
-3) K-Means(random) vs K-Means++ comparison CSV (>= 3 k values)
+聚类实验流水线（面向对象重构版本）
+支持肘部法、轮廓系数评估、K-Means vs K-Means++ 对比实验
 """
 
 import argparse
-import os
+from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Tuple
 
 import matplotlib.pyplot as plt
@@ -18,178 +15,205 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import MinMaxScaler
 
 
-DEFAULT_NUMERIC_FEATURES = [
-    "age",
-    "Medu",
-    "Fedu",
-    "traveltime",
-    "studytime",
-    "failures",
-    "famrel",
-    "freetime",
-    "goout",
-    "Dalc",
-    "Walc",
-    "health",
-    "absences",
-    "G1",
-    "G2",
-    "G3",
-]
+@dataclass
+class ExperimentConfig:
+    """聚类实验配置"""
+    data_path: str = "data/student_all.csv"
+    output_dir: str = "output"
+    k_min: int = 2
+    k_max: int = 10
+    compare_k: List[int] = None
+    random_state: int = 42
+    
+    def __post_init__(self):
+        if self.compare_k is None:
+            self.compare_k = [3, 4, 5]
 
 
-def load_dataset(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Dataset not found: {path}")
-    # Student dataset commonly uses ';' separator.
-    return pd.read_csv(path, sep=";")
+class DataLoader:
+    """数据加载与特征工程"""
+    
+    DEFAULT_FEATURES = [
+        "age", "Medu", "Fedu", "traveltime", "studytime", "failures",
+        "famrel", "freetime", "goout", "Dalc", "Walc", "health",
+        "absences", "G1", "G2", "G3"
+    ]
+    
+    @staticmethod
+    def load(path: str) -> pd.DataFrame:
+        """智能加载不同格式的数据集"""
+        if not Path(path).exists():
+            raise FileNotFoundError(f"数据集不存在: {path}")
+        
+        if path.endswith(("student_all.csv", "student_all_augmented.csv")):
+            return pd.read_csv(path)
+        else:
+            return pd.read_csv(path, sep=";")
+    
+    @staticmethod
+    def prepare_features(df: pd.DataFrame, feature_cols: List[str] = None) -> pd.DataFrame:
+        """特征选择、清洗和归一化"""
+        if feature_cols is None:
+            feature_cols = DataLoader.DEFAULT_FEATURES
+            
+        missing = [c for c in feature_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"缺失特征列: {missing}")
+        
+        x = df[feature_cols].copy()
+        x = x.dropna(axis=0, how="any")
+        
+        scaler = MinMaxScaler()
+        x_scaled = scaler.fit_transform(x)
+        
+        return pd.DataFrame(x_scaled, columns=feature_cols)
 
 
-def prepare_features(df: pd.DataFrame, feature_cols: List[str]) -> pd.DataFrame:
-    missing = [c for c in feature_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing expected columns: {missing}")
-    x = df[feature_cols].copy()
-    x = x.dropna(axis=0, how="any")
-    scaler = MinMaxScaler()
-    x_scaled = scaler.fit_transform(x)
-    return pd.DataFrame(x_scaled, columns=feature_cols)
-
-
-def evaluate_k_range(
-    x: pd.DataFrame,
-    k_min: int,
-    k_max: int,
-    random_state: int,
-) -> pd.DataFrame:
-    rows = []
-    for k in range(k_min, k_max + 1):
-        model = KMeans(
-            n_clusters=k,
-            init="k-means++",
-            n_init=20,
-            max_iter=300,
-            random_state=random_state,
-        )
-        labels = model.fit_predict(x)
-        sse = float(model.inertia_)
-        sil = float(silhouette_score(x, labels))
-        rows.append({"k": k, "sse": sse, "silhouette": sil})
-    return pd.DataFrame(rows)
-
-
-def plot_metrics(metrics_df: pd.DataFrame, output_dir: str) -> Tuple[str, str]:
-    os.makedirs(output_dir, exist_ok=True)
-
-    elbow_png = os.path.join(output_dir, "elbow_curve.png")
-    sil_png = os.path.join(output_dir, "silhouette_curve.png")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(metrics_df["k"], metrics_df["sse"], marker="o")
-    plt.title("Elbow Method (K-Means++)")
-    plt.xlabel("k")
-    plt.ylabel("SSE (Inertia)")
-    plt.xticks(metrics_df["k"].tolist())
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(elbow_png, dpi=150)
-    plt.close()
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(metrics_df["k"], metrics_df["silhouette"], marker="o")
-    plt.title("Silhouette Score by k (K-Means++)")
-    plt.xlabel("k")
-    plt.ylabel("Silhouette")
-    plt.xticks(metrics_df["k"].tolist())
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(sil_png, dpi=150)
-    plt.close()
-
-    return elbow_png, sil_png
-
-
-def compare_algorithms(x: pd.DataFrame, k_values: List[int]) -> pd.DataFrame:
-    rows = []
-    for k in k_values:
-        for init_name in ["random", "k-means++"]:
+class ClusteringEvaluator:
+    """聚类评估与可视化"""
+    
+    def __init__(self, output_dir: str = "output"):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+    
+    def evaluate_k_range(self, x: pd.DataFrame, k_min: int, k_max: int, 
+                        random_state: int = 42) -> pd.DataFrame:
+        """评估不同 k 值的聚类效果（SSE + Silhouette）"""
+        rows = []
+        for k in range(k_min, k_max + 1):
             model = KMeans(
                 n_clusters=k,
-                init=init_name,
+                init="k-means++",
                 n_init=20,
                 max_iter=300,
-                random_state=42,
+                random_state=random_state,
             )
             labels = model.fit_predict(x)
-            rows.append(
-                {
+            sse = float(model.inertia_)
+            sil = float(silhouette_score(x, labels))
+            rows.append({"k": k, "sse": sse, "silhouette": sil})
+        
+        return pd.DataFrame(rows)
+    
+    def plot_metrics(self, metrics_df: pd.DataFrame, prefix: str = "") -> Tuple[str, str]:
+        """绘制肘部法和轮廓系数图"""
+        elbow_path = self.output_dir / f"{prefix}elbow_curve.png"
+        sil_path = self.output_dir / f"{prefix}silhouette_curve.png"
+        
+        # Elbow Curve
+        plt.figure(figsize=(8, 5))
+        plt.plot(metrics_df["k"], metrics_df["sse"], marker="o")
+        plt.title("Elbow Method (K-Means++)")
+        plt.xlabel("Number of Clusters (k)")
+        plt.ylabel("SSE (Inertia)")
+        plt.xticks(metrics_df["k"].tolist())
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(elbow_path, dpi=150)
+        plt.close()
+        
+        # Silhouette Score
+        plt.figure(figsize=(8, 5))
+        plt.plot(metrics_df["k"], metrics_df["silhouette"], marker="o")
+        plt.title("Silhouette Score by k")
+        plt.xlabel("Number of Clusters (k)")
+        plt.ylabel("Silhouette Coefficient")
+        plt.xticks(metrics_df["k"].tolist())
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(sil_path, dpi=150)
+        plt.close()
+        
+        return str(elbow_path), str(sil_path)
+    
+    def compare_initializers(self, x: pd.DataFrame, k_values: List[int]) -> pd.DataFrame:
+        """对比 K-Means 与 K-Means++"""
+        rows = []
+        for k in k_values:
+            for init_name in ["random", "k-means++"]:
+                model = KMeans(
+                    n_clusters=k,
+                    init=init_name,
+                    n_init=20,
+                    max_iter=300,
+                    random_state=42,
+                )
+                labels = model.fit_predict(x)
+                rows.append({
                     "k": k,
                     "algorithm": "K-Means" if init_name == "random" else "K-Means++",
                     "init": init_name,
                     "sse": float(model.inertia_),
                     "silhouette": float(silhouette_score(x, labels)),
                     "iterations": int(model.n_iter_),
-                }
-            )
-    result = pd.DataFrame(rows).sort_values(["k", "algorithm"]).reset_index(drop=True)
-    return result
+                })
+        
+        return pd.DataFrame(rows).sort_values(["k", "algorithm"]).reset_index(drop=True)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run clustering experiments.")
-    parser.add_argument(
-        "--data-path",
-        default="data/student-mat.csv",
-        help="Path to dataset CSV file.",
+class ExperimentRunner:
+    """聚类实验运行主类"""
+    
+    def __init__(self, config: ExperimentConfig):
+        self.config = config
+        self.loader = DataLoader()
+        self.evaluator = ClusteringEvaluator(config.output_dir)
+    
+    def run(self):
+        """执行完整实验流程"""
+        print(f"开始聚类实验 - 数据源: {self.config.data_path}")
+        
+        df = self.loader.load(self.config.data_path)
+        X = self.loader.prepare_features(df)
+        
+        print(f"使用样本数: {len(X)} 条")
+        
+        # 1. Elbow + Silhouette 评估
+        metrics_df = self.evaluator.evaluate_k_range(
+            X, self.config.k_min, self.config.k_max, self.config.random_state
+        )
+        metrics_df.to_csv(
+            self.evaluator.output_dir / "elbow_silhouette_metrics.csv", 
+            index=False, encoding="utf-8-sig"
+        )
+        
+        self.evaluator.plot_metrics(metrics_df)
+        
+        # 2. 对比实验
+        compare_df = self.evaluator.compare_initializers(X, self.config.compare_k)
+        compare_df.to_csv(
+            self.evaluator.output_dir / "kmeans_vs_kmeanspp_comparison.csv",
+            index=False, encoding="utf-8-sig"
+        )
+        
+        print("🎉 实验完成！")
+        print(f"输出目录: {self.evaluator.output_dir.absolute()}")
+        print(f"生成文件: elbow_silhouette_metrics.csv, kmeans_vs_kmeanspp_comparison.csv, *.png")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="毕业设计 - 聚类分析实验工具")
+    parser.add_argument("--data-path", default="data/student_all.csv", help="数据集路径")
+    parser.add_argument("--output-dir", default="output", help="输出目录")
+    parser.add_argument("--k-min", type=int, default=2)
+    parser.add_argument("--k-max", type=int, default=10)
+    parser.add_argument("--compare-k", default="3,4,5")
+    parser.add_argument("--random-state", type=int, default=42)
+    
+    args = parser.parse_args()
+    compare_k = [int(k.strip()) for k in args.compare_k.split(",")]
+    
+    config = ExperimentConfig(
+        data_path=args.data_path,
+        output_dir=args.output_dir,
+        k_min=args.k_min,
+        k_max=args.k_max,
+        compare_k=compare_k,
+        random_state=args.random_state,
     )
-    parser.add_argument(
-        "--output-dir",
-        default="output",
-        help="Directory to save experiment results.",
-    )
-    parser.add_argument("--k-min", type=int, default=2, help="Min k for elbow scan.")
-    parser.add_argument("--k-max", type=int, default=10, help="Max k for elbow scan.")
-    parser.add_argument(
-        "--compare-k",
-        default="3,4,5",
-        help="Comma-separated k values for K-Means vs K-Means++ comparison.",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=42,
-        help="Random state for elbow/silhouette run.",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    compare_k_values = [int(v.strip()) for v in args.compare_k.split(",") if v.strip()]
-    if len(compare_k_values) < 3:
-        raise ValueError("Please provide at least 3 k values in --compare-k.")
-
-    df = load_dataset(args.data_path)
-    x = prepare_features(df, DEFAULT_NUMERIC_FEATURES)
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    metrics_df = evaluate_k_range(x, args.k_min, args.k_max, args.random_state)
-    metrics_csv = os.path.join(args.output_dir, "elbow_silhouette_metrics.csv")
-    metrics_df.to_csv(metrics_csv, index=False, encoding="utf-8-sig")
-
-    elbow_png, sil_png = plot_metrics(metrics_df, args.output_dir)
-
-    compare_df = compare_algorithms(x, compare_k_values)
-    compare_csv = os.path.join(args.output_dir, "kmeans_vs_kmeanspp_comparison.csv")
-    compare_df.to_csv(compare_csv, index=False, encoding="utf-8-sig")
-
-    print("Experiment completed.")
-    print(f"Data path: {args.data_path}")
-    print(f"Rows used for clustering: {len(x)}")
-    print(f"Metrics CSV: {metrics_csv}")
-    print(f"Elbow plot: {elbow_png}")
-    print(f"Silhouette plot: {sil_png}")
-    print(f"Comparison CSV: {compare_csv}")
+    
+    runner = ExperimentRunner(config)
+    runner.run()
 
 
 if __name__ == "__main__":
