@@ -1,6 +1,6 @@
 """
-聚类实验流水线（面向对象重构版本）
-支持肘部法、轮廓系数评估、K-Means vs K-Means++ 对比实验
+聚类实验流水线
+支持肘部法、轮廓系数评估、多算法对比实验
 """
 
 import argparse
@@ -11,20 +11,25 @@ from typing import List, Tuple
 import matplotlib.pyplot as plt
 import pandas as pd
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, davies_bouldin_score
 from sklearn.preprocessing import MinMaxScaler
+import time
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from pso_kmeans import PSOKMeans
 
 
 @dataclass
 class ExperimentConfig:
     """聚类实验配置"""
-    data_path: str = "data/student_all.csv"
+    data_path: str = "data/student_all_augmented.csv"
     output_dir: str = "output"
     k_min: int = 2
     k_max: int = 10
     compare_k: List[int] = None
     random_state: int = 42
-    
+
     def __post_init__(self):
         if self.compare_k is None:
             self.compare_k = [3, 4, 5]
@@ -53,19 +58,35 @@ class DataLoader:
     @staticmethod
     def prepare_features(df: pd.DataFrame, feature_cols: List[str] = None) -> pd.DataFrame:
         """特征选择、清洗和归一化"""
+
+        for col in ['G1', 'G2', 'G3']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col].astype(str).str.replace('"', ''), errors='coerce')
+
+        if all(c in df.columns for c in ['G1', 'G2', 'G3']):
+            df['grade_volatility'] = df[['G1', 'G2', 'G3']].std(axis=1)
+            df['grade_trend'] = df['G3'] - df['G1']
+            df['total_grade'] = df['G1'] + df['G2'] + df['G3']
+
+        if 'total_grade' in df.columns and 'studytime' in df.columns:
+            df['study_efficiency'] = df['total_grade'] / df['studytime'].clip(lower=1)
+
         if feature_cols is None:
-            feature_cols = DataLoader.DEFAULT_FEATURES
-            
+            feature_cols = DataLoader.DEFAULT_FEATURES.copy()
+            for new_col in ['grade_volatility', 'grade_trend', 'total_grade', 'study_efficiency']:
+                if new_col in df.columns:
+                    feature_cols.append(new_col)
+
         missing = [c for c in feature_cols if c not in df.columns]
         if missing:
             raise ValueError(f"缺失特征列: {missing}")
-        
+
         x = df[feature_cols].copy()
         x = x.dropna(axis=0, how="any")
-        
+
         scaler = MinMaxScaler()
         x_scaled = scaler.fit_transform(x)
-        
+
         return pd.DataFrame(x_scaled, columns=feature_cols)
 
 
@@ -76,9 +97,9 @@ class ClusteringEvaluator:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
     
-    def evaluate_k_range(self, x: pd.DataFrame, k_min: int, k_max: int, 
+    def evaluate_k_range(self, x: pd.DataFrame, k_min: int, k_max: int,
                         random_state: int = 42) -> pd.DataFrame:
-        """评估不同 k 值的聚类效果（SSE + Silhouette）"""
+        """评估不同 k 值的聚类效果"""
         rows = []
         for k in range(k_min, k_max + 1):
             model = KMeans(
@@ -92,7 +113,7 @@ class ClusteringEvaluator:
             sse = float(model.inertia_)
             sil = float(silhouette_score(x, labels))
             rows.append({"k": k, "sse": sse, "silhouette": sil})
-        
+
         return pd.DataFrame(rows)
     
     def plot_metrics(self, metrics_df: pd.DataFrame, prefix: str = "") -> Tuple[str, str]:
@@ -127,27 +148,38 @@ class ClusteringEvaluator:
         return str(elbow_path), str(sil_path)
     
     def compare_initializers(self, x: pd.DataFrame, k_values: List[int]) -> pd.DataFrame:
-        """对比 K-Means 与 K-Means++"""
+        """对比不同聚类算法"""
         rows = []
         for k in k_values:
-            for init_name in ["random", "k-means++"]:
-                model = KMeans(
-                    n_clusters=k,
-                    init=init_name,
-                    n_init=20,
-                    max_iter=300,
-                    random_state=42,
-                )
+            for init_name in ["random", "k-means++", "pso"]:
+                start_time = time.time()
+
+                if init_name == "pso":
+                    model = PSOKMeans(n_clusters=k, random_state=42)
+                    algo_name = "PSO-KMeans"
+                else:
+                    model = KMeans(
+                        n_clusters=k,
+                        init=init_name,
+                        n_init=10 if init_name == "random" else 20,
+                        max_iter=300,
+                        random_state=42,
+                    )
+                    algo_name = "K-Means" if init_name == "random" else "K-Means++"
+
                 labels = model.fit_predict(x)
+                elapsed_time = time.time() - start_time
+
                 rows.append({
                     "k": k,
-                    "algorithm": "K-Means" if init_name == "random" else "K-Means++",
+                    "algorithm": algo_name,
                     "init": init_name,
                     "sse": float(model.inertia_),
                     "silhouette": float(silhouette_score(x, labels)),
-                    "iterations": int(model.n_iter_),
+                    "davies_bouldin": float(davies_bouldin_score(x, labels)),
+                    "time_sec": elapsed_time
                 })
-        
+
         return pd.DataFrame(rows).sort_values(["k", "algorithm"]).reset_index(drop=True)
 
 
@@ -186,23 +218,23 @@ class ExperimentRunner:
             index=False, encoding="utf-8-sig"
         )
         
-        print("🎉 实验完成！")
+        print("实验完成！")
         print(f"输出目录: {self.evaluator.output_dir.absolute()}")
         print(f"生成文件: elbow_silhouette_metrics.csv, kmeans_vs_kmeanspp_comparison.csv, *.png")
 
 
 def main():
     parser = argparse.ArgumentParser(description="毕业设计 - 聚类分析实验工具")
-    parser.add_argument("--data-path", default="data/student_all.csv", help="数据集路径")
+    parser.add_argument("--data-path", default="data/student_all_augmented.csv", help="数据集路径")
     parser.add_argument("--output-dir", default="output", help="输出目录")
     parser.add_argument("--k-min", type=int, default=2)
     parser.add_argument("--k-max", type=int, default=10)
     parser.add_argument("--compare-k", default="3,4,5")
     parser.add_argument("--random-state", type=int, default=42)
-    
+
     args = parser.parse_args()
     compare_k = [int(k.strip()) for k in args.compare_k.split(",")]
-    
+
     config = ExperimentConfig(
         data_path=args.data_path,
         output_dir=args.output_dir,
@@ -211,7 +243,7 @@ def main():
         compare_k=compare_k,
         random_state=args.random_state,
     )
-    
+
     runner = ExperimentRunner(config)
     runner.run()
 

@@ -35,7 +35,7 @@ class DataAugmenter:
         """验证输入文件"""
         if not self.input_path.exists():
             raise FileNotFoundError(f"输入文件不存在: {self.input_path}")
-        print(f"✓ 找到输入文件: {self.input_path.name}")
+        print(f"[OK] 找到输入文件: {self.input_path.name}")
         return True
 
     def get_numeric_columns(self, df: pd.DataFrame) -> List[str]:
@@ -84,17 +84,17 @@ class DataAugmenter:
             self.validate()
             df = pd.read_csv(self.input_path)
             print(f"原始数据形状: {df.shape}")
-            
+
             augmented_df = self.augment(df)
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
             augmented_df.to_csv(self.output_path, index=False, encoding="utf-8-sig")
-            
-            print(f"✅ 增强数据已保存至: {self.output_path.name}")
-            print(f"总记录数: {len(augmented_df):,} 条（原始 {len(df)} 条 × {self.config.n_augments + 1}）")
+
+            print(f"[SUCCESS] 增强数据已保存至: {self.output_path.name}")
+            print(f"总记录数: {len(augmented_df):,} 条（原始 {len(df)} 条 x {self.config.n_augments + 1}）")
             return True
-            
+
         except Exception as e:
-            print(f"❌ 数据增强失败: {e}")
+            print(f"[ERROR] 数据增强失败: {e}")
             return False
 
 

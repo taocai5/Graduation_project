@@ -6,9 +6,10 @@ pandas==1.4.2
 numpy==1.21.5
 scikit-learn==1.0.2
 
-# 可视化
+# 可视化与系统界面
 matplotlib==3.5.1
 seaborn==0.11.2
+streamlit
 
 # 融合算法与并行加速
 scipy

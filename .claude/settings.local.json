@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from scripts.visualize import generate_education_diagnosis; print\\('visualize 导入成功'\\)\")"
+    ]
+  }
+}
