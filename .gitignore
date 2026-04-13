@@ -42,6 +42,7 @@ output/*.png
 output/*.pkl
 output/*.model
 output/*.csv
+results/
 #文档
 md文档/
 #key
