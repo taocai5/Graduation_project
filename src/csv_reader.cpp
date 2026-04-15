@@ -3,69 +3,142 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <stdexcept>
 
-// Helper to strip quotes
-static std::string strip_quotes(std::string s) {
-    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
-        return s.substr(1, s.size() - 2);
-    }
+static std::string strip_impl(std::string s) {
+    // trim whitespace and surrounding quotes
+    auto not_space = [](char c){ return !std::isspace((unsigned char)c); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+        s = s.substr(1, s.size() - 2);
     return s;
 }
 
-std::vector<StudentData> CsvReader::load_numeric_data(const std::string& filepath) {
-    std::vector<StudentData> data;
+std::string CsvReader::strip(std::string s) {
+    return strip_impl(std::move(s));
+}
+
+char CsvReader::detect_delimiter(const std::string& header_line) {
+    int commas    = std::count(header_line.begin(), header_line.end(), ',');
+    int semicolons = std::count(header_line.begin(), header_line.end(), ';');
+    return (semicolons > commas) ? ';' : ',';
+}
+
+std::vector<std::string> CsvReader::split(const std::string& line, char delim) {
+    std::vector<std::string> tokens;
+    std::stringstream ss(line);
+    std::string token;
+    while (std::getline(ss, token, delim))
+        tokens.push_back(strip_impl(token));
+    return tokens;
+}
+
+// 对某列采样前 sample_n 个非空行，判断是否为数值列
+bool CsvReader::is_numeric_col(
+    const std::vector<std::vector<std::string>>& rows, int col_idx, int sample_n)
+{
+    int checked = 0;
+    for (const auto& row : rows) {
+        if (col_idx >= (int)row.size()) continue;
+        const std::string& v = row[col_idx];
+        if (v.empty()) continue;
+        try {
+            std::size_t pos;
+            std::stod(v, &pos);
+            if (pos != v.size()) return false;  // trailing non-numeric chars
+        } catch (...) {
+            return false;
+        }
+        if (++checked >= sample_n) break;
+    }
+    return checked > 0;
+}
+
+Dataset CsvReader::load(
+    const std::string& filepath,
+    const std::vector<std::string>& feature_cols,
+    const std::vector<std::string>& skip_cols)
+{
+    Dataset result;
     std::ifstream file(filepath);
     if (!file.is_open()) {
-        std::cerr << "Error opening file: " << filepath << std::endl;
-        return data;
+        std::cerr << "[CsvReader] Cannot open: " << filepath << "\n";
+        return result;
     }
 
+    std::string header_line;
+    if (!std::getline(file, header_line)) return result;
+
+    char delim = detect_delimiter(header_line);
+    std::vector<std::string> headers = split(header_line, delim);
+
+    // 读取所有数据行（用于自动列检测时的采样）
+    std::vector<std::vector<std::string>> raw_rows;
     std::string line;
-    // Read header
-    if (!std::getline(file, line)) return data;
-
-    // Map column names to indices
-    std::vector<std::string> headers;
-    std::stringstream ss(line);
-    std::string cell;
-    while (std::getline(ss, cell, ';')) {
-        headers.push_back(strip_quotes(cell));
-    }
-
-    // Identify numerical columns we want to use
-    std::vector<std::string> target_cols = {
-        "age", "Medu", "Fedu", "traveltime", "studytime", "failures",
-        "famrel", "freetime", "goout", "Dalc", "Walc", "health", "absences",
-        "G1", "G2", "G3"
-    };
-    
-    std::vector<int> target_indices;
-    for (const auto& col : target_cols) {
-        auto it = std::find(headers.begin(), headers.end(), col);
-        if (it != headers.end()) {
-            target_indices.push_back(std::distance(headers.begin(), it));
-        }
-    }
-
     while (std::getline(file, line)) {
-        std::stringstream line_ss(line);
-        std::vector<std::string> row_values;
-        while (std::getline(line_ss, cell, ';')) {
-            row_values.push_back(strip_quotes(cell));
+        if (line.empty()) continue;
+        auto row = split(line, delim);
+        raw_rows.push_back(std::move(row));
+    }
+
+    // 确定要加载的列索引
+    std::vector<int> col_indices;
+
+    if (!feature_cols.empty()) {
+        // 用户显式指定列名
+        for (const auto& col : feature_cols) {
+            auto it = std::find(headers.begin(), headers.end(), col);
+            if (it == headers.end()) {
+                std::cerr << "[CsvReader] Column not found: " << col << "\n";
+                continue;
+            }
+            col_indices.push_back((int)std::distance(headers.begin(), it));
+            result.feature_names.push_back(col);
         }
-
-        if (row_values.size() != headers.size()) continue;
-
-        StudentData student;
-        for (int idx : target_indices) {
-            try {
-                student.features.push_back(std::stod(row_values[idx]));
-            } catch (...) {
-                student.features.push_back(0.0); // Fallback
+    } else {
+        // 自动检测：选所有数值列，跳过 skip_cols
+        for (int i = 0; i < (int)headers.size(); ++i) {
+            const std::string& h = headers[i];
+            // 是否在跳过列表中
+            bool skip = std::find(skip_cols.begin(), skip_cols.end(), h) != skip_cols.end();
+            if (skip) continue;
+            if (is_numeric_col(raw_rows, i)) {
+                col_indices.push_back(i);
+                result.feature_names.push_back(h);
             }
         }
-        data.push_back(student);
     }
 
-    return data;
+    if (col_indices.empty()) {
+        std::cerr << "[CsvReader] No usable columns found in: " << filepath << "\n";
+        return result;
+    }
+
+    // 将原始字符串行转换为 DataRow
+    result.rows.reserve(raw_rows.size());
+    for (const auto& row : raw_rows) {
+        if (row.size() < headers.size()) continue;
+
+        DataRow dr;
+        dr.features.reserve(col_indices.size());
+        bool valid = true;
+        for (int idx : col_indices) {
+            const std::string& v = row[idx];
+            if (v.empty()) {
+                dr.features.push_back(0.0);  // 缺失值填 0
+                continue;
+            }
+            try {
+                dr.features.push_back(std::stod(v));
+            } catch (...) {
+                valid = false;
+                break;  // 无法解析的行直接跳过
+            }
+        }
+        if (valid && dr.features.size() == col_indices.size())
+            result.rows.push_back(std::move(dr));
+    }
+
+    return result;
 }

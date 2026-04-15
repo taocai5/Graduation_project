@@ -2,108 +2,146 @@
 #include "kmeans.h"
 #include <iostream>
 #include <iomanip>
-#include <algorithm>
 #include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <cmath>
+#include <numeric>
 
-void normalize(std::vector<StudentData>& data) {
-    if (data.empty()) return;
-    size_t num_features = data[0].features.size();
-    
-    for (size_t j = 0; j < num_features; ++j) {
-        double min_val = data[0].features[j];
-        double max_val = data[0].features[j];
-        
-        for (const auto& student : data) {
-            min_val = std::min(min_val, student.features[j]);
-            max_val = std::max(max_val, student.features[j]);
+// ---- 归一化（Min-Max，原地修改）----
+void normalize(std::vector<DataRow>& rows) {
+    if (rows.empty()) return;
+    size_t dim = rows[0].features.size();
+    for (size_t j = 0; j < dim; ++j) {
+        double mn = rows[0].features[j], mx = mn;
+        for (const auto& r : rows) {
+            mn = std::min(mn, r.features[j]);
+            mx = std::max(mx, r.features[j]);
         }
-        
-        double range = max_val - min_val;
+        double range = mx - mn;
         if (range < 1e-9) continue;
-        
-        for (auto& student : data) {
-            student.features[j] = (student.features[j] - min_val) / range;
-        }
+        for (auto& r : rows)
+            r.features[j] = (r.features[j] - mn) / range;
     }
 }
 
-int main() {
-    // Try multiple paths
-    std::vector<std::string> paths = {
-        "data/student-mat.csv",
-        "../data/student-mat.csv",
-        "../../data/student-mat.csv",
-        "n:/cpp_project/Graduation_project/data/student-mat.csv"
-    };
-    
-    std::string filepath;
-    std::vector<StudentData> data;
-    
-    for (const auto& p : paths) {
-        std::cout << "Trying to load data from: " << p << std::endl;
-        data = CsvReader::load_numeric_data(p);
-        if (!data.empty()) {
-            filepath = p;
-            break;
-        }
-    }
-    
-    if (data.empty()) {
-        std::cerr << "Failed to load data. Please check if the file exists." << std::endl;
-        return 1;
-    }
-    
-    std::cout << "Successfully loaded " << data.size() << " students from " << filepath << std::endl;
-    if (!data.empty()) {
-        std::cout << "Features per student: " << data[0].features.size() << std::endl;
-    }
-    
-    std::cout << "Normalizing data..." << std::endl;
-    normalize(data);
-    
-    int k = 3;
-    std::cout << "Running K-Means with k=" << k << "..." << std::endl;
-    
-    KMeans kmeans(k);
-    kmeans.fit(data);
-    
-    const auto& clusters = kmeans.get_clusters();
-    
-    std::cout << "\nClustering Results:" << std::endl;
-    for (size_t i = 0; i < clusters.size(); ++i) {
-        std::cout << "Cluster " << i << ": " << clusters[i].point_indices.size() << " students" << std::endl;
-        std::cout << "Centroid (first 5 features): [";
-        for (size_t j = 0; j < std::min((size_t)5, clusters[i].centroid.size()); ++j) {
-            std::cout << std::fixed << std::setprecision(2) << clusters[i].centroid[j] << (j < std::min((size_t)5, clusters[i].centroid.size()) - 1 ? ", " : "");
-        }
-        if (clusters[i].centroid.size() > 5) std::cout << ", ...";
-        std::cout << "]" << std::endl;
-    }
-
-    // Save results to CSV
-    std::string output_path = "output/clustering_results.csv";
-    // Check if output dir exists, create if not (platform dependent, using system command for simplicity or assuming it exists)
-    // The 'output' directory exists based on LS.
-    
-    std::ofstream out_file(output_path);
-    if (out_file.is_open()) {
-        out_file << "StudentIndex,ClusterID\n";
-        
-        // Create a mapping from student index to cluster ID
-        std::vector<int> assignments(data.size(), -1);
-        for (size_t i = 0; i < clusters.size(); ++i) {
-            for (int idx : clusters[i].point_indices) {
-                assignments[idx] = i;
+// ---- SSE 计算 ----
+double compute_sse(const std::vector<DataRow>& data, const std::vector<Cluster>& clusters) {
+    double sse = 0.0;
+    for (const auto& cl : clusters) {
+        for (int idx : cl.point_indices) {
+            const auto& f = data[idx].features;
+            for (size_t d = 0; d < f.size(); ++d) {
+                double diff = f[d] - cl.centroid[d];
+                sse += diff * diff;
             }
         }
-        
-        for (size_t i = 0; i < assignments.size(); ++i) {
-            out_file << i << "," << assignments[i] << "\n";
-        }
-        std::cout << "\nResults saved to " << output_path << std::endl;
-    } else {
-        std::cerr << "Failed to save results to " << output_path << std::endl;
     }
-    
+    return sse;
+}
+
+// ---- 解析逗号分隔的列名字符串 ----
+std::vector<std::string> parse_cols(const std::string& s) {
+    std::vector<std::string> cols;
+    std::stringstream ss(s);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+        // trim
+        tok.erase(0, tok.find_first_not_of(" \t"));
+        tok.erase(tok.find_last_not_of(" \t") + 1);
+        if (!tok.empty()) cols.push_back(tok);
+    }
+    return cols;
+}
+
+void print_usage(const char* prog) {
+    std::cout
+        << "Usage: " << prog << " [options]\n"
+        << "  --data <path>          CSV file path (default: data/train-data.csv)\n"
+        << "  --cols <c1,c2,...>     Columns to use (default: auto-detect numeric)\n"
+        << "  --skip <c1,c2,...>     Columns to skip in auto-detect mode\n"
+        << "  --k <int>              Number of clusters (default: 4)\n"
+        << "  --iters <int>          Max K-Means iterations (default: 100)\n"
+        << "  --output <path>        Output CSV path (default: output/clustering_results.csv)\n"
+        << "  --no-normalize         Disable Min-Max normalization\n";
+}
+
+int main(int argc, char* argv[]) {
+    // ---- 默认参数 ----
+    std::string data_path   = "data/train-data.csv";
+    std::string output_path = "output/clustering_results.csv";
+    std::string cols_str, skip_str;
+    int k = 4, max_iters = 100;
+    bool do_normalize = true;
+
+    // ---- 解析命令行 ----
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h") { print_usage(argv[0]); return 0; }
+        else if (arg == "--data"   && i+1 < argc) data_path   = argv[++i];
+        else if (arg == "--cols"   && i+1 < argc) cols_str    = argv[++i];
+        else if (arg == "--skip"   && i+1 < argc) skip_str    = argv[++i];
+        else if (arg == "--k"      && i+1 < argc) k           = std::stoi(argv[++i]);
+        else if (arg == "--iters"  && i+1 < argc) max_iters   = std::stoi(argv[++i]);
+        else if (arg == "--output" && i+1 < argc) output_path = argv[++i];
+        else if (arg == "--no-normalize") do_normalize = false;
+        else { std::cerr << "Unknown argument: " << arg << "\n"; print_usage(argv[0]); return 1; }
+    }
+
+    auto feature_cols = parse_cols(cols_str);
+    auto skip_cols    = parse_cols(skip_str);
+
+    // ---- 加载数据 ----
+    std::cout << "Loading: " << data_path << "\n";
+    Dataset ds = CsvReader::load(data_path, feature_cols, skip_cols);
+    if (ds.rows.empty()) {
+        std::cerr << "No data loaded. Exiting.\n";
+        return 1;
+    }
+
+    std::cout << "Rows: " << ds.rows.size()
+              << "  Features (" << ds.feature_names.size() << "): ";
+    for (size_t i = 0; i < ds.feature_names.size(); ++i)
+        std::cout << ds.feature_names[i] << (i+1 < ds.feature_names.size() ? ", " : "\n");
+
+    // ---- 归一化 ----
+    if (do_normalize) {
+        std::cout << "Normalizing (Min-Max)...\n";
+        normalize(ds.rows);
+    }
+
+    // ---- 聚类 ----
+    std::cout << "Running K-Means++ with k=" << k << "...\n";
+    KMeans kmeans(k, max_iters);
+    kmeans.fit(ds.rows);
+
+    const auto& clusters = kmeans.get_clusters();
+    double sse = compute_sse(ds.rows, clusters);
+
+    std::cout << "\n=== Results ===\n";
+    std::cout << std::fixed << std::setprecision(4);
+    std::cout << "SSE: " << sse << "\n";
+    for (size_t i = 0; i < clusters.size(); ++i) {
+        std::cout << "Cluster " << i << ": " << clusters[i].point_indices.size() << " points  centroid=[";
+        for (size_t d = 0; d < clusters[i].centroid.size(); ++d)
+            std::cout << clusters[i].centroid[d] << (d+1 < clusters[i].centroid.size() ? ", " : "]\n");
+    }
+
+    // ---- 保存结果 ----
+    std::vector<int> assignments(ds.rows.size(), -1);
+    for (size_t i = 0; i < clusters.size(); ++i)
+        for (int idx : clusters[i].point_indices)
+            assignments[idx] = (int)i;
+
+    std::ofstream out(output_path);
+    if (!out.is_open()) {
+        std::cerr << "Cannot write to: " << output_path << "\n";
+        return 1;
+    }
+    out << "RowIndex,ClusterID\n";
+    for (size_t i = 0; i < assignments.size(); ++i)
+        out << i << "," << assignments[i] << "\n";
+
+    std::cout << "Saved to: " << output_path << "\n";
     return 0;
 }
